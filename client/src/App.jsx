@@ -13,7 +13,7 @@ function App() {
   const [loadingAi, setLoadingAi] = useState(null);
 
   useEffect(() => {
-    fetch('http://localhost:5000/api/customers')
+    fetch('http://res = await fetch(`https://tdc-matchmaker-portal-backend.onrender.com/api/customers/${client.id}/matches`);/api/customers')
       .then(res => res.json())
       .then(data => setCustomers(data))
       .catch(err => console.error("Error fetching customers:", err));
@@ -35,7 +35,7 @@ function App() {
     setAiEmails({});
 
     try {
-      const res = await fetch(`http://localhost:5000/api/customers/${client.id}/matches`);
+      const res = await fetch(`https://tdc-matchmaker-portal-backend.onrender.com/api/customers/${client.id}/matches`);
       const data = await res.json();
       setMatches(data);
     } catch (error) {
@@ -48,7 +48,7 @@ function App() {
   const handleGenerateEmail = async (match) => {
     setLoadingAi(match.id);
     try {
-      const res = await fetch('http://localhost:5000/api/generate-intro', {
+      const res = await fetch('https://tdc-matchmaker-portal-backend.onrender.com/api/generate-intro', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ client: selectedClient, match: match })
