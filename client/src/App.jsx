@@ -13,7 +13,8 @@ function App() {
   const [loadingAi, setLoadingAi] = useState(null);
 
   useEffect(() => {
-    fetch('http://res = await fetch(`https://tdc-matchmaker-portal-backend.onrender.com/api/customers/${client.id}/matches`);/api/customers')
+    // FIX: Corrected the mangled URL string here
+    fetch('https://tdc-matchmaker-portal-backend.onrender.com/api/customers')
       .then(res => res.json())
       .then(data => setCustomers(data))
       .catch(err => console.error("Error fetching customers:", err));
