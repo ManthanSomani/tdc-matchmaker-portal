@@ -1,103 +1,110 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const { rateLimit } = require('express-rate-limit');
 const { OpenAI } = require('openai');
 const data = require('./data.json');
+const { authenticate, issueToken, requireAuth, requireRole } = require('./auth');
+const { buildCandidatePool, scoreMatch } = require('./matching');
+const { fetchCareerScores } = require('./nlp');
+const { introSchema, loginSchema, preferencesSchema } = require('./schemas');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173')
+  .split(',').map((origin) => origin.trim()).filter(Boolean);
 
-// --- HOT-SWAP: POINTING OPENAI SDK TO GROQ ---
-const openai = new OpenAI({
-  apiKey: process.env.GROQ_API_KEY,
-  baseURL: "https://api.groq.com/openai/v1"
+app.use(helmet());
+app.use(cors({ origin: allowedOrigins, credentials: false }));
+app.use(express.json({ limit: '100kb' }));
+app.use('/api', rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: 'draft-8' }));
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', service: 'tdc-matchmaker-api', syntheticData: true });
 });
 
-const NLP_URL = process.env.NLP_SERVICE_URL;
+app.post('/api/auth/login', async (req, res, next) => {
+  try {
+    const credentials = loginSchema.parse(req.body);
+    const user = await authenticate(credentials.username, credentials.password);
+    if (!user) return res.status(401).json({ error: 'Invalid credentials.' });
+    return res.json({ token: issueToken(user), user });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.use('/api/customers', requireAuth, requireRole('matchmaker'));
+app.use('/api/generate-intro', requireAuth, requireRole('matchmaker'));
 
 app.get('/api/customers', (req, res) => {
-  res.json(data);
+  const page = Math.max(1, Number.parseInt(req.query.page || '1', 10));
+  const limit = Math.min(24, Math.max(6, Number.parseInt(req.query.limit || '12', 10)));
+  const search = String(req.query.search || '').trim().toLowerCase();
+  const filtered = search
+    ? data.filter((profile) => `${profile.firstName} ${profile.lastName} ${profile.city} ${profile.designation}`.toLowerCase().includes(search))
+    : data;
+  const start = (page - 1) * limit;
+  res.json({
+    data: filtered.slice(start, start + limit),
+    meta: { page, limit, total: filtered.length, totalPages: Math.max(1, Math.ceil(filtered.length / limit)) },
+  });
 });
 
-app.get('/api/customers/:id/matches', async (req, res) => {
-  const user = data.find(c => c.id === parseInt(req.params.id));
-  if (!user) return res.status(404).send('User not found');
-
-  let pool = data.filter(profile => profile.gender !== user.gender);
-  let nlpScores = [];
-
+app.post('/api/customers/:id/matches', async (req, res, next) => {
   try {
-    const matchDesignations = pool.map(m => m.designation);
-    const nlpResponse = await fetch(`${NLP_URL}/api/batch-similarity`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_text: user.designation,
-        match_texts: matchDesignations
-      })
-    });
-
-    if (!nlpResponse.ok) throw new Error("Python server returned an error");
-    const nlpData = await nlpResponse.json();
-    nlpScores = nlpData.scores || []; 
-    
+    const user = data.find((profile) => profile.id === Number(req.params.id));
+    if (!user) return res.status(404).json({ error: 'Client not found.' });
+    const preferences = preferencesSchema.parse(req.body || {});
+    const pool = buildCandidatePool(data, user, preferences);
+    const career = await fetchCareerScores(user.designation, pool.map((match) => match.designation));
+    const matches = pool
+      .map((match, index) => scoreMatch(user, match, career.scores[index], preferences.weights))
+      .sort((left, right) => right.matchScore - left.matchScore)
+      .slice(0, 5);
+    return res.json({ data: matches, meta: { scoringSource: career.source, warning: career.warning || null } });
   } catch (error) {
-    console.warn("⚠️ NLP Engine offline or failed. Falling back to basic math scoring.");
-    nlpScores = Array(pool.length).fill(0); 
+    return next(error);
   }
+});
 
-  let scoredMatches = pool.map((match, index) => {
-    let totalScore = 0;
-
-    if (user.gender === 'Male') {
-      if (match.age < user.age) totalScore += 30;
-      if (match.height < user.height) totalScore += 20;
-      if (match.wantKids === user.wantKids) totalScore += 20;
-    } else if (user.gender === 'Female') {
-      if (match.religion === user.religion) totalScore += 40;
-      if (match.openToRelocate === user.openToRelocate) totalScore += 30;
+app.post('/api/generate-intro', async (req, res, next) => {
+  try {
+    const { client, match } = introSchema.parse(req.body);
+    if (!process.env.GROQ_API_KEY) {
+      return res.json({
+        explanation: `${client.firstName} and ${match.firstName} share promising professional and lifestyle alignment.`,
+        emailDraft: `Hi ${client.firstName},\n\nI found a profile that may be worth exploring: ${match.firstName}, a ${match.designation}. Their preferences align with several priorities in your profile. Would you like me to arrange an introduction?`,
+        source: 'template-fallback',
+      });
     }
 
-    const careerAlignmentScore = (nlpScores[index] || 0) * 0.30;
-    totalScore += careerAlignmentScore;
-
-    return { ...match, matchScore: Math.round(totalScore) };
-  });
-
-  scoredMatches.sort((a, b) => b.matchScore - a.matchScore);
-  res.json(scoredMatches.slice(0, 5));
-});
-
-// --- AREA: AI EMAIL GENERATOR (POWERED BY GROQ) ---
-app.post('/api/generate-intro', async (req, res) => {
-  const { client, match } = req.body;
-
-  const prompt = `
-    You are an expert matchmaker for The Date Crew.
-    Client: ${client.firstName}, ${client.age} years old, works as ${client.designation}.
-    Match: ${match.firstName}, ${match.age} years old, works as ${match.designation}.
-
-    Write a 1-sentence explanation of why they are a good match based on their profiles.
-    Then, write a short, warm, 3-sentence email to the Client introducing the Match. 
-    Separate the explanation and the email with a "|".
-  `;
-
-  try {
-    const aiResponse = await openai.chat.completions.create({
-      // Swapped to the current, active Groq Llama 3.1 model
-      model: "llama-3.1-8b-instant", 
-      messages: [{ role: "user", content: prompt }],
+    const openai = new OpenAI({ apiKey: process.env.GROQ_API_KEY, baseURL: 'https://api.groq.com/openai/v1' });
+    const prompt = `Return JSON with keys explanation and emailDraft. Explain, without sensitive-trait assumptions, why ${client.firstName} (${client.designation}) and ${match.firstName} (${match.designation}) may be compatible. Then draft a warm three-sentence opt-in introduction email.`;
+    const response = await openai.chat.completions.create({
+      model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+      messages: [{ role: 'user', content: prompt }],
+      response_format: { type: 'json_object' },
+      temperature: 0.4,
     });
-
-    const result = aiResponse.choices[0].message.content.split("|");
-    res.json({ explanation: result[0].trim(), emailDraft: result[1].trim() });
+    const parsed = JSON.parse(response.choices[0].message.content);
+    return res.json({ ...parsed, source: 'groq' });
   } catch (error) {
-    console.error("AI Error:", error);
-    res.status(500).send("AI error");
+    return next(error);
   }
 });
 
-app.listen(5000, () => {
-  console.log("Node Server running on port 5000");
+app.use((error, _req, res, _next) => {
+  if (error.name === 'ZodError') {
+    return res.status(400).json({ error: 'Invalid request.', details: error.issues });
+  }
+  console.error(error);
+  return res.status(500).json({ error: 'The service could not complete the request.' });
 });
+
+if (require.main === module) {
+  const port = Number(process.env.PORT || 5000);
+  app.listen(port, () => console.log(`TDC API listening on port ${port}`));
+}
+
+module.exports = { app };
