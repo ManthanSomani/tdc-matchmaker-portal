@@ -1,2 +1,9 @@
-﻿node_modules/
+node_modules/
 .env
+dist/
+*.tsbuildinfo
+.vercel/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
