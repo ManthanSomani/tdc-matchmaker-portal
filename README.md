@@ -1,5 +1,9 @@
 # TDC Matchmaker Portal
 
+[Live frontend](https://tdc-matchmaker-portal.vercel.app/) · [API health](https://tdc-matchmaker-portal-backend.onrender.com/health)
+
+Demo sign-in: `admin` / `TdcDemo2026!`
+
 An explainable, consent-based matchmaking workflow built as a full-stack portfolio project. A React/TypeScript frontend talks to a secured Node/Express API, which optionally calls a FastAPI sentence-transformer service for career similarity and Groq for opt-in introduction drafts.
 
 > Portfolio status: functional engineering demo. Every profile is synthetic. This is not a production matchmaking service and should not be used for real personal data.
